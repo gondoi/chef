@@ -16,10 +16,13 @@
 # limitations under the License.
 #
 
+require 'timeout'
+
 require 'chef/provider/package'
 require 'chef/mixin/command'
 require 'chef/resource/package'
 require 'chef/mixin/shell_out'
+require 'chef/mixin/file'
 
 
 class Chef
@@ -90,6 +93,7 @@ class Chef
         def install_package(name, version)
           package_name = "#{name}=#{version}"
           package_name = name if @is_virtual_package
+          AptDB::Locks.wait_on_lock(300)
           run_command_with_systems_locale(
             :command => "apt-get -q -y#{expand_options(default_release_options)}#{expand_options(@new_resource.options)} install #{package_name}",
             :environment => {
@@ -141,6 +145,56 @@ class Chef
           )
         end
 
+      end
+    end
+  end
+end
+
+module AptDB
+  module Locks
+    #This function opens the file passed, and checks to see if it is locked
+    def self.is_locked? fname
+      f = File.new(fname)
+      if f.flocked?
+        f.close
+        return true
+      else
+        f.close
+        return false
+      end
+    end
+
+    #This function runs through possible apt lock files and checks for a current lock
+    def self.apt_locked?
+      lock_files = [
+        "/var/lib/dpkg/lock",
+        "/var/lock/aptitude",
+        "/var/cache/apt/archives/lock",
+        "/var/lib/apt/lists/lock"
+      ]
+
+      lock_files.each do |f|
+        if File.exists?(f) and is_locked?(f)
+          return true
+        end
+      end
+      return false
+    end
+
+    #This function will ask if apt is locked and sleep
+    def self.wait_on_lock( timeout_sec = 60 )
+      begin
+        Timeout::timeout(timeout_sec) do
+          if apt_locked?
+            Chef::Log.warn("Apt DB is locked. Sleeping...")
+            while apt_locked?
+              sleep(5)
+            end
+            Chef::Log.info("Apt DB is free. Waking up.")
+          end
+        end
+      rescue
+        Chef::Application.fatal!("Apt has been locked for too long.", -10)
       end
     end
   end
